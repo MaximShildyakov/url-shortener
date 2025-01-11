@@ -1,24 +1,30 @@
 package main
 
 import (
-	"errors"
+	// "context"
 	"net/http"
-	// "log/slog"
 	"os"
-	"strings"
+	// "os/signal"
+	// "syscall"
+	// "time"
+	// "strings"
+	// "errors"
 
-	mwLogger "github.com/MaximShildyakov/url-shortener/cmd/internal/http-server/middleware/logger"
-	"github.com/MaximShildyakov/url-shortener/cmd/internal/http-server/middleware/logger/handlers/url/save"
-
-	"github.com/MaximShildyakov/url-shortener/cmd/internal/config"
-	"github.com/MaximShildyakov/url-shortener/cmd/internal/lib/logger/sl"
-	storagePkg "github.com/MaximShildyakov/url-shortener/cmd/internal/storage"
-	"github.com/MaximShildyakov/url-shortener/cmd/internal/storage/sqlite"
-
-	// "github.com/go-chi/chi/middleware"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"golang.org/x/exp/slog"
+
+
+
+	"github.com/MaximShildyakov/url-shortener/internal/config"
+	"github.com/MaximShildyakov/url-shortener/internal/http-server/handlers/redirect"
+	"github.com/MaximShildyakov/url-shortener/internal/http-server/handlers/url/save"
+	mwLogger "github.com/MaximShildyakov/url-shortener/internal/http-server/middleware/logger"
+	"github.com/MaximShildyakov/url-shortener/internal/lib/logger/handlers/slogpretty"
+	"github.com/MaximShildyakov/url-shortener/internal/lib/logger/sl"
+	"github.com/MaximShildyakov/url-shortener/internal/storage/sqlite"
+	//storagePkg "github.com/MaximShildyakov/url-shortener/internal/storage"
+	"github.com/MaximShildyakov/url-shortener/internal/http-server/handlers/delete"
 )
 
 const (
@@ -39,7 +45,10 @@ func main(){
 
 	log := setupLogger(cfg.Env)
 
-	log.Info("starting url-shortener", slog.String("env", cfg.Env))
+	log.Info("starting url-shortener",
+		slog.String("env", cfg.Env),
+		slog.String("version", "123"),
+	)
 	log.Debug("debug messages are enabled")
 
 	storage, err := sqlite.New(cfg.StoragePath)
@@ -48,29 +57,31 @@ func main(){
 		os.Exit(1)
 	}
 
-	id, err := storage.SaveURL("https://google.com", "google")
-	if err != nil {
-		if errors.Is(err, storagePkg.ErrURLExists) {
-			log.Warn("URL already exists in the database", sl.Err(err))
-		} else {
-			log.Error("failed to save url", sl.Err(err))
-			return
-		}
-	} else {
-		log.Info("saved url", slog.Int64("id", id))
-	}
+	// id, err := storage.SaveURL("https://google.com", "google")
+	// if err != nil {
+	// 	if errors.Is(err, storagePkg.ErrURLExists) {
+	// 		log.Warn("URL already exists in the database", sl.Err(err))
+	// 	} else {
+	// 		log.Error("failed to save url", sl.Err(err))
+	// 		return
+	// 	}
+	// } else {
+	// 	log.Info("saved url", slog.Int64("id", id))
+	// }
 
-	id, err = storage.SaveURL("https://new-url.com", "new")
-	if err != nil {
-		if strings.Contains(err.Error(), "url exists") {
-			log.Warn("URL already exists in the database", sl.Err(err))
-		} else {
-			log.Error("failed to save url", sl.Err(err))
-			return
-		}
-	} else {
-		log.Info("saved url", slog.Int64("id", id))
-	}
+	// id, err = storage.SaveURL("https://new-url.com", "new")
+	// if err != nil {
+	// 	if strings.Contains(err.Error(), "url exists") {
+	// 		log.Warn("URL already exists in the database", sl.Err(err))
+	// 	} else {
+	// 		log.Error("failed to save url", sl.Err(err))
+	// 		return
+	// 	}
+	// } else {
+	// 	log.Info("saved url", slog.Int64("id", id))
+	// }
+
+	
 
 	router := chi.NewRouter()
 
@@ -81,16 +92,29 @@ func main(){
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.URLFormat)
 
-	router.Post("/url", save.New(log, storage))
+	router.Route("/url", func(r chi.Router){
+		r.Use(middleware.BasicAuth("url-shortener", map[string]string{
+			cfg.HTTPServer.User: cfg.HTTPServer.Password,
+		}))
+
+		r.Post("/", save.New(log, storage))
+		r.Delete("/{alias}", delete.New(log, storage))
+	})
+
+	// router.Post("/url", save.New(log, storage))
+	router.Get("/{alias}", redirect.New(log, storage))
+	//router.Delete("/{alias}", delete.New(log, storage))
 
 	log.Info("starting server", slog.String("address", cfg.Address))
+
+	log.Info("HTTPServer config: %+v\n", cfg.HTTPServer)
 	
 	srv := &http.Server{
 		Addr:         cfg.Address,
 		Handler:      router,
-		ReadTimeout:  cfg.HTTPServer.Timout,
-		WriteTimeout: cfg.HTTPServer.Timout,
-		IdleTimeout:  cfg.HTTPServer.IdleTimout,
+		ReadTimeout:  cfg.HTTPServer.Timeout,
+		WriteTimeout: cfg.HTTPServer.Timeout,
+		IdleTimeout:  cfg.HTTPServer.IdleTimeout,
 	}
 
 	if err := srv.ListenAndServe(); err != nil{
@@ -129,7 +153,7 @@ func main(){
 
 
 
-	_ = storage
+	// _ = storage
 
 }
 
@@ -138,9 +162,7 @@ func setupLogger(env string) *slog.Logger{
 
 	switch env{
 	case envLocal:
-		log = slog.New(
-			slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}),
-		)
+		log = setupPrettySlog()
 	case envDev:
 		log = slog.New(
 			slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}),
@@ -153,4 +175,16 @@ func setupLogger(env string) *slog.Logger{
 	}
 
 	return log
+}
+
+func setupPrettySlog() *slog.Logger {
+	opts := slogpretty.PrettyHandlerOptions{
+		SlogOpts: &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		},
+	}
+
+	handler := opts.NewPrettyHandler(os.Stdout)
+
+	return slog.New(handler)
 }
